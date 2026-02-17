@@ -1,0 +1,62 @@
+services:
+  seaweedfs:
+    restart: unless-stopped
+    image: chrislusf/seaweedfs:latest
+    ports:
+      - "8333:8333"
+      - "8888:8888"
+      - "9333:9333"
+    command: "server -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.port=9333 -volume.port=8080 -filer.port=8888"
+    configs:
+      - source: seaweedfs-s3
+        target: /etc/seaweedfs/s3.json
+    volumes:
+      - seaweedfs_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9333/cluster/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  proxy:
+    restart: unless-stopped
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      STORAGE_BACKEND: s3
+      AWS_ENDPOINT_URL: http://seaweedfs:8333
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: adminadmin
+      AWS_REGION: us-east-1
+      S3_BUCKET: oci-cache
+      LOG_LEVEL: debug
+    healthcheck:
+      test: ["CMD", "/oci-pull-through", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+
+configs:
+  seaweedfs-s3:
+    content: |
+      {
+        "identities": [
+          {
+            "name": "admin",
+            "credentials": [
+              {
+                "accessKey": "admin",
+                "secretKey": "adminadmin"
+              }
+            ],
+            "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+          }
+        ]
+      }
+
+volumes:
+  seaweedfs_data:
