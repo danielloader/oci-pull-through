@@ -86,6 +86,7 @@ All configuration is via environment variables.
 | --- | --- | --- |
 | `S3_BUCKET` | `oci-cache` | Bucket name. Auto-created. |
 | `S3_FORCE_PATH_STYLE` | `true` | Path-style S3 URLs. |
+| `S3_LIFECYCLE_DAYS` | `28` | Expire cached objects after this many days. `0` disables. |
 | `AWS_ACCESS_KEY_ID` | -- | Standard SDK credential chain. |
 | `AWS_SECRET_ACCESS_KEY` | -- | Standard SDK credential chain. |
 | `AWS_REGION` | -- | Standard SDK credential chain. |

@@ -3,6 +3,7 @@ package config
 import (
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -18,6 +19,7 @@ type Config struct {
 	S3ForcePathStyle     bool
 	CacheTagManifests    bool
 	CacheLatestTag       bool
+	S3LifecycleDays       int
 	GenerateSelfSignedTLS bool
 	LogLevel             slog.Level
 }
@@ -29,12 +31,15 @@ func Load() Config {
 		defaultAddr = ":8443"
 	}
 
+	lifecycleDays, _ := strconv.Atoi(envOr("S3_LIFECYCLE_DAYS", "28"))
+
 	return Config{
 		StorageBackend:        envOr("STORAGE_BACKEND", "s3"),
 		FSRoot:                envOr("FS_ROOT", "/data/oci-cache"),
 		ListenAddr:            envOr("LISTEN_ADDR", defaultAddr),
 		S3Bucket:              envOr("S3_BUCKET", "oci-cache"),
 		S3ForcePathStyle:      envOr("S3_FORCE_PATH_STYLE", "true") == "true",
+		S3LifecycleDays:       lifecycleDays,
 		CacheTagManifests:     envOr("CACHE_TAG_MANIFESTS", "true") == "true",
 		CacheLatestTag:        envOr("CACHE_LATEST_TAG", "false") == "true",
 		GenerateSelfSignedTLS: selfSigned,

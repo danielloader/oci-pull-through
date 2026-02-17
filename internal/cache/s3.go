@@ -3,9 +3,11 @@ package cache
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -14,19 +16,21 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // S3Store provides S3-backed caching for OCI objects.
 type S3Store struct {
-	client *s3.Client
-	bucket string
+	client        *s3.Client
+	bucket        string
+	lifecycleDays int
 }
 
 // NewS3Store creates a new S3 cache store.
 // Credentials, region, and endpoint are resolved via the standard AWS SDK
 // default credential chain (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
 // AWS_REGION, AWS_ENDPOINT_URL, instance profiles, etc.).
-func NewS3Store(ctx context.Context, bucket string, forcePathStyle bool) (*S3Store, error) {
+func NewS3Store(ctx context.Context, bucket string, forcePathStyle bool, lifecycleDays int) (*S3Store, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("loading AWS config: %w", err)
@@ -39,12 +43,14 @@ func NewS3Store(ctx context.Context, bucket string, forcePathStyle bool) (*S3Sto
 	})
 
 	return &S3Store{
-		client: client,
-		bucket: bucket,
+		client:        client,
+		bucket:        bucket,
+		lifecycleDays: lifecycleDays,
 	}, nil
 }
 
-// Init creates the S3 bucket if it doesn't already exist.
+// Init creates the S3 bucket if it doesn't already exist and applies
+// a lifecycle policy to expire cached objects.
 func (s *S3Store) Init(ctx context.Context) error {
 	_, err := s.client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String(s.bucket),
@@ -55,11 +61,35 @@ func (s *S3Store) Init(ctx context.Context) error {
 		var bae *types.BucketAlreadyExists
 		if isError(err, &baoby) || isError(err, &bae) {
 			slog.Debug("bucket already exists", "bucket", s.bucket)
-			return nil
+		} else {
+			return fmt.Errorf("creating bucket: %w", err)
 		}
-		return fmt.Errorf("creating bucket: %w", err)
+	} else {
+		slog.Debug("bucket created", "bucket", s.bucket)
 	}
-	slog.Debug("bucket created", "bucket", s.bucket)
+
+	if s.lifecycleDays > 0 {
+		_, err := s.client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+			Bucket: aws.String(s.bucket),
+			LifecycleConfiguration: &types.BucketLifecycleConfiguration{
+				Rules: []types.LifecycleRule{
+					{
+						ID:     aws.String("oci-cache-expiry"),
+						Status: types.ExpirationStatusEnabled,
+						Filter: &types.LifecycleRuleFilter{Prefix: aws.String("")},
+						Expiration: &types.LifecycleExpiration{
+							Days: aws.Int32(int32(s.lifecycleDays)),
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("setting bucket lifecycle policy: %w", err)
+		}
+		slog.Info("bucket lifecycle policy applied", "bucket", s.bucket, "expiry_days", s.lifecycleDays)
+	}
+
 	return nil
 }
 
@@ -131,11 +161,14 @@ func (s *S3Store) GetWithMeta(ctx context.Context, key string) (*GetResult, erro
 // and manifest overwrites are harmless. The proxy handler already does a HEAD
 // check before fetching from upstream, so duplicate writes are unlikely.
 func (s *S3Store) Put(ctx context.Context, key string, body io.Reader, meta ObjectMeta) error {
-	// Write data object
+	// Write data object with conditional PUT — if the key already exists
+	// another writer won the race; since blobs are content-addressed the
+	// existing object is identical, so we treat the conflict as success.
 	input := &s3.PutObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-		Body:   body,
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(key),
+		Body:        body,
+		IfNoneMatch: aws.String("*"),
 	}
 
 	if meta.ContentLength > 0 {
@@ -154,6 +187,10 @@ func (s *S3Store) Put(ctx context.Context, key string, body io.Reader, meta Obje
 		},
 	)
 	if err != nil {
+		if isConditionalPutConflict(err) {
+			slog.Debug("object already cached, skipping duplicate upload", "key", key)
+			return nil
+		}
 		return fmt.Errorf("putting data to S3: %w", err)
 	}
 
@@ -174,6 +211,17 @@ func (s *S3Store) Put(ctx context.Context, key string, body io.Reader, meta Obje
 	}
 
 	return nil
+}
+
+// isConditionalPutConflict returns true when the S3 PutObject error indicates
+// the object already exists (HTTP 412 Precondition Failed or 409 Conflict).
+func isConditionalPutConflict(err error) bool {
+	var re *smithyhttp.ResponseError
+	if errors.As(err, &re) {
+		return re.HTTPStatusCode() == http.StatusPreconditionFailed ||
+			re.HTTPStatusCode() == http.StatusConflict
+	}
+	return false
 }
 
 // isError checks if an error matches a target type using string matching,

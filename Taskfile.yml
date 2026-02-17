@@ -26,3 +26,4 @@ tasks:
       S3_BUCKET: oci-cache
       LOG_LEVEL: debug
       GENERATE_SELF_SIGNED_TLS: "false"
+      S3_LIFECYCLE_DAYS: "1"

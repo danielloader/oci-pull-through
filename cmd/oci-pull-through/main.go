@@ -114,7 +114,7 @@ func main() {
 func newStore(ctx context.Context, cfg config.Config) (cache.Store, error) {
 	switch cfg.StorageBackend {
 	case "s3":
-		return cache.NewS3Store(ctx, cfg.S3Bucket, cfg.S3ForcePathStyle)
+		return cache.NewS3Store(ctx, cfg.S3Bucket, cfg.S3ForcePathStyle, cfg.S3LifecycleDays)
 	case "fs":
 		return cache.NewFSStore(cfg.FSRoot), nil
 	default:
