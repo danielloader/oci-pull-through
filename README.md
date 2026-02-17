@@ -60,7 +60,9 @@ controlled by configuration:
 | Manifest by `latest` | Configurable | Both tag and latest flags |
 
 When tag manifests are cached, they are served with
-`Cache-Control: public, max-age=60`.
+`Cache-Control: public, max-age=2419200` (28 days). The `latest`
+tag uses a shorter `Cache-Control: public, max-age=3600` (1 hour)
+to balance freshness with upstream rate limits.
 
 Non-2xx upstream responses are forwarded to the client as-is and
 are never cached.
@@ -191,13 +193,35 @@ by a reverse proxy or load balancer in front of this service.
 
 Setting `GENERATE_SELF_SIGNED_TLS=true` generates an in-memory
 ECDSA P-256 self-signed certificate on startup (valid for 10 years,
-with SANs for `localhost`, `127.0.0.1`, and `::1`). The server
-switches to HTTPS with HTTP/2 and the default listen address
-changes to `:8443`.
+with SANs for `localhost`, `host.docker.internal`, `127.0.0.1`,
+and `::1`). The server switches to HTTPS with HTTP/2 and the
+default listen address changes to `:8443`.
 
 This is useful for local development where the Docker daemon
 requires HTTPS to pull from a registry. No certificate files are
 written to disk.
+
+#### Docker Desktop (macOS / Windows)
+
+On Docker Desktop the daemon runs inside a Linux VM. The VM's
+loopback (`127.0.0.1` / `[::1]`) does not reach the host, so
+`localhost:8443` will not work. Use `host.docker.internal` instead:
+
+```shell
+docker pull host.docker.internal:8443/docker.io/library/postgres:13
+```
+
+You will also need to add the registry to Docker's insecure
+registries list (since the certificate is self-signed). In Docker
+Desktop go to **Settings → Docker Engine** and add:
+
+```json
+{
+  "insecure-registries": ["host.docker.internal:8443"]
+}
+```
+
+Then apply and restart Docker Desktop.
 
 Authorization headers from the client are forwarded to the upstream
 registry as-is. The proxy does not perform authentication or token

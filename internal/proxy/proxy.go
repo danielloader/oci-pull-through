@@ -278,10 +278,15 @@ func writeError(w http.ResponseWriter, msg string, code int) {
 
 // setCacheControl sets Cache-Control headers based on content type.
 // Blobs and digest manifests are immutable (content-addressed).
-// Tag manifests get a short max-age since tags can move.
+// Tag manifests get a shorter max-age since tags can move:
+// "latest" gets 1 hour, other tags get 28 days.
 func setCacheControl(w http.ResponseWriter, info requestInfo) {
 	if info.isTagManifest() {
-		w.Header().Set("Cache-Control", "public, max-age=60")
+		if info.Reference == "latest" {
+			w.Header().Set("Cache-Control", "public, max-age=3600")
+		} else {
+			w.Header().Set("Cache-Control", "public, max-age=2419200")
+		}
 	} else {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	}
