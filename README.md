@@ -125,25 +125,26 @@ on port 8333.
 
 ### Container image
 
-```dockerfile
-FROM golang:1.26-alpine AS builder
-# ...
-FROM scratch
-```
+Images are built with [ko][ko] using a
+`gcr.io/distroless/static-debian12:nonroot` base image.
 
-The image is built from `scratch`. It contains the static binary,
-CA certificates, and nothing else. It runs as `nobody`.
+[ko]: https://ko.build
 
-Build and run:
+Build a local image:
 
 ```shell
-docker build -t oci-pull-through .
+KO_DOCKER_REPO=ko.local ko build ./cmd/oci-pull-through
+```
+
+Run it:
+
+```shell
 docker run -p 8080:8080 \
   -e STORAGE_BACKEND=s3 \
   -e AWS_ENDPOINT_URL=http://your-s3:9000 \
   -e AWS_ACCESS_KEY_ID=access \
   -e AWS_SECRET_ACCESS_KEY=secret \
-  oci-pull-through
+  ko.local/oci-pull-through
 ```
 
 ### Binary
