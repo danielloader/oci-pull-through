@@ -1,0 +1,45 @@
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+name: Release
+run-name: Release
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.PRIVATE_PACKAGE_ACCESS_APP_ID }}
+          private-key: ${{ secrets.PRIVATE_PACKAGE_ACCESS_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          cache: 'npm'
+          cache-dependency-path: '**/.github/workflows/release.yaml'
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: >
+          npx
+          -p semantic-release@24.1.2
+          -p @semantic-release/changelog@6.0.3
+          -p @semantic-release/exec@6.0.3
+          -p @semantic-release/git@10.0.1
+          -p conventional-changelog-conventionalcommits@8.0.0
+          -p semantic-release-replace-plugin@1.2.7
+          semantic-release

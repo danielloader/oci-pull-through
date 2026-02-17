@@ -72,7 +72,8 @@ All configuration is via environment variables.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `STORAGE_BACKEND` | `s3` | Storage backend. `s3` or `fs`. |
-| `LISTEN_ADDR` | `:8080` | HTTP listen address. |
+| `LISTEN_ADDR` | `:8080` (`:8443` with TLS) | Listen address. |
+| `GENERATE_SELF_SIGNED_TLS` | `false` | Generate a self-signed TLS certificate on startup. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
 | `CACHE_TAG_MANIFESTS` | `true` | Cache manifests resolved by tag. |
 | `CACHE_LATEST_TAG` | `false` | Cache the `latest` tag. |
@@ -182,9 +183,21 @@ for upstream requests.
 
 ## Protocol
 
-The proxy serves both HTTP/1.1 and cleartext HTTP/2 (h2c) on the
-same port. TLS termination is expected to be handled by a reverse
-proxy or load balancer in front of this service.
+By default the proxy serves both HTTP/1.1 and cleartext HTTP/2
+(h2c) on the same port. TLS termination is expected to be handled
+by a reverse proxy or load balancer in front of this service.
+
+### Self-signed TLS
+
+Setting `GENERATE_SELF_SIGNED_TLS=true` generates an in-memory
+ECDSA P-256 self-signed certificate on startup (valid for 10 years,
+with SANs for `localhost`, `127.0.0.1`, and `::1`). The server
+switches to HTTPS with HTTP/2 and the default listen address
+changes to `:8443`.
+
+This is useful for local development where the Docker daemon
+requires HTTPS to pull from a registry. No certificate files are
+written to disk.
 
 Authorization headers from the client are forwarded to the upstream
 registry as-is. The proxy does not perform authentication or token

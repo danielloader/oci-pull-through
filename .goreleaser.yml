@@ -1,0 +1,50 @@
+version: 2
+
+builds:
+  - id: oci-pull-through
+    main: ./cmd/oci-pull-through
+    binary: oci-pull-through
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+release:
+  mode: append
+
+kos:
+  - build: oci-pull-through
+    base_image: gcr.io/distroless/static-debian12:nonroot
+    repositories:
+      - ghcr.io/danielloader/oci-pull-through
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    tags:
+      - "{{.Version}}"
+      - latest
+    sbom: none
+    bare: true
+    preserve_import_paths: false
+    labels:
+      org.opencontainers.image.source: https://github.com/danielloader/oci-pull-through
+      org.opencontainers.image.revision: "{{.FullCommit}}"
+      org.opencontainers.image.version: "{{.Version}}"
+      org.opencontainers.image.created: "{{.Date}}"
+      org.opencontainers.image.title: oci-pull-through
+      org.opencontainers.image.description: Persistent simple OCI registry pull through cache backed by S3

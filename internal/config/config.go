@@ -11,26 +11,34 @@ import (
 // credential chain and do not appear in this struct.
 
 type Config struct {
-	StorageBackend     string
-	FSRoot             string
-	ListenAddr         string
-	S3Bucket           string
-	S3ForcePathStyle   bool
-	CacheTagManifests  bool
-	CacheLatestTag     bool
-	LogLevel           slog.Level
+	StorageBackend       string
+	FSRoot               string
+	ListenAddr           string
+	S3Bucket             string
+	S3ForcePathStyle     bool
+	CacheTagManifests    bool
+	CacheLatestTag       bool
+	GenerateSelfSignedTLS bool
+	LogLevel             slog.Level
 }
 
 func Load() Config {
+	selfSigned := envOr("GENERATE_SELF_SIGNED_TLS", "false") == "true"
+	defaultAddr := ":8080"
+	if selfSigned {
+		defaultAddr = ":8443"
+	}
+
 	return Config{
-		StorageBackend:     envOr("STORAGE_BACKEND", "s3"),
-		FSRoot:             envOr("FS_ROOT", "/data/oci-cache"),
-		ListenAddr:         envOr("LISTEN_ADDR", ":8080"),
-		S3Bucket:           envOr("S3_BUCKET", "oci-cache"),
-		S3ForcePathStyle:   envOr("S3_FORCE_PATH_STYLE", "true") == "true",
-		CacheTagManifests:  envOr("CACHE_TAG_MANIFESTS", "true") == "true",
-		CacheLatestTag:     envOr("CACHE_LATEST_TAG", "false") == "true",
-		LogLevel:           parseLogLevel(envOr("LOG_LEVEL", "info")),
+		StorageBackend:        envOr("STORAGE_BACKEND", "s3"),
+		FSRoot:                envOr("FS_ROOT", "/data/oci-cache"),
+		ListenAddr:            envOr("LISTEN_ADDR", defaultAddr),
+		S3Bucket:              envOr("S3_BUCKET", "oci-cache"),
+		S3ForcePathStyle:      envOr("S3_FORCE_PATH_STYLE", "true") == "true",
+		CacheTagManifests:     envOr("CACHE_TAG_MANIFESTS", "true") == "true",
+		CacheLatestTag:        envOr("CACHE_LATEST_TAG", "false") == "true",
+		GenerateSelfSignedTLS: selfSigned,
+		LogLevel:              parseLogLevel(envOr("LOG_LEVEL", "info")),
 	}
 }
 

@@ -1,0 +1,28 @@
+version: "3"
+
+tasks:
+  build:
+    desc: Build local Docker image using ko
+    cmds:
+      - ko build ./cmd/oci-pull-through
+    env:
+      KO_DOCKER_REPO: ko.local
+
+  build:remote:
+    desc: Build and publish using GoReleaser
+    cmds:
+      - goreleaser release --clean
+
+  run:
+    desc: Build and run the proxy against local seaweedfs
+    cmds:
+      - go build ./cmd/oci-pull-through && ./oci-pull-through
+    env:
+      STORAGE_BACKEND: s3
+      AWS_ENDPOINT_URL: http://localhost:8333
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: adminadmin
+      AWS_REGION: us-east-1
+      S3_BUCKET: oci-cache
+      LOG_LEVEL: debug
+      GENERATE_SELF_SIGNED_TLS: "false"

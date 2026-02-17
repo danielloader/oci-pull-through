@@ -18,28 +18,6 @@ services:
       timeout: 3s
       retries: 5
 
-  proxy:
-    restart: unless-stopped
-    build: .
-    ports:
-      - "8080:8080"
-    environment:
-      STORAGE_BACKEND: s3
-      AWS_ENDPOINT_URL: http://seaweedfs:8333
-      AWS_ACCESS_KEY_ID: admin
-      AWS_SECRET_ACCESS_KEY: adminadmin
-      AWS_REGION: us-east-1
-      S3_BUCKET: oci-cache
-      LOG_LEVEL: debug
-    healthcheck:
-      test: ["CMD", "/oci-pull-through", "-healthcheck"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-    depends_on:
-      seaweedfs:
-        condition: service_healthy
-
 configs:
   seaweedfs-s3:
     content: |
