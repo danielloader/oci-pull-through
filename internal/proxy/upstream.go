@@ -52,6 +52,16 @@ func (u *UpstreamClient) Do(r *http.Request, info requestInfo) (*http.Response, 
 		req.Header.Set("Accept", accept)
 	}
 
+	// Forward Range/If-Range headers so upstream can return 206 Partial Content
+	// for resumable downloads. The non-200 code path already forwards partial
+	// responses without caching.
+	if rng := r.Header.Get("Range"); rng != "" {
+		req.Header.Set("Range", rng)
+	}
+	if ifRange := r.Header.Get("If-Range"); ifRange != "" {
+		req.Header.Set("If-Range", ifRange)
+	}
+
 	return u.Client.Do(req)
 }
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/danielloader/oci-pull-through/internal/cache"
 	"github.com/danielloader/oci-pull-through/internal/stream"
@@ -112,13 +113,7 @@ func (h *Handler) handleHead(w http.ResponseWriter, r *http.Request, info reques
 	if h.shouldCache(info) {
 		meta, err := h.Cache.Head(r.Context(), key)
 		if err == nil {
-			w.Header().Set("Content-Type", meta.ContentType)
-			if meta.DockerContentDigest != "" {
-				w.Header().Set("Docker-Content-Digest", meta.DockerContentDigest)
-			}
-			if meta.ContentLength > 0 {
-				w.Header().Set("Content-Length", fmt.Sprintf("%d", meta.ContentLength))
-			}
+			replayStoredHeaders(w, meta)
 			w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 			setCacheControl(w, info)
 			w.WriteHeader(http.StatusOK)
@@ -147,18 +142,19 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, info request
 		if err == nil {
 			slog.Info("cache hit", "image", info.image(), "kind", info.Kind, "ref", info.shortRef())
 			defer result.Body.Close()
-			w.Header().Set("Content-Type", result.Meta.ContentType)
-			if result.Meta.DockerContentDigest != "" {
-				w.Header().Set("Docker-Content-Digest", result.Meta.DockerContentDigest)
-			}
-			if result.Meta.ContentLength > 0 {
-				w.Header().Set("Content-Length", fmt.Sprintf("%d", result.Meta.ContentLength))
-			}
+			replayStoredHeaders(w, result.Meta)
 			w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 			setCacheControl(w, info)
-			w.WriteHeader(http.StatusOK)
-			if _, err := copyToClient(w, result.Body); err != nil {
-				slog.Debug("error streaming cached response", "error", err)
+			if seeker, ok := result.Body.(io.ReadSeeker); ok {
+				// FS backend returns *os.File (seekable) — let ServeContent
+				// handle Range negotiation, 206 responses, and Content-Range.
+				http.ServeContent(w, r, "", time.Time{}, seeker)
+			} else {
+				// S3 backend returns a non-seekable stream — serve full body.
+				w.WriteHeader(http.StatusOK)
+				if _, err := copyToClient(w, result.Body); err != nil {
+					slog.Debug("error streaming cached response", "error", err)
+				}
 			}
 			return
 		}
@@ -204,6 +200,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, info request
 		ContentType:         resp.Header.Get("Content-Type"),
 		DockerContentDigest: resp.Header.Get("Docker-Content-Digest"),
 		ContentLength:       resp.ContentLength,
+		Header:              cloneResponseHeaders(resp),
 	}
 
 	err = stream.TeeToStore(r.Context(), resp.Body, w, h.Cache, key, putMeta)
@@ -232,6 +229,43 @@ func copyResponseHeaders(w http.ResponseWriter, resp *http.Response) {
 		}
 		for _, v := range values {
 			w.Header().Add(key, v)
+		}
+	}
+}
+
+// cloneResponseHeaders returns a copy of the upstream response headers,
+// excluding hop-by-hop headers, suitable for persisting in cache metadata.
+func cloneResponseHeaders(resp *http.Response) http.Header {
+	h := make(http.Header)
+	for key, values := range resp.Header {
+		if _, hop := hopByHopHeaders[http.CanonicalHeaderKey(key)]; hop {
+			continue
+		}
+		h[http.CanonicalHeaderKey(key)] = append([]string(nil), values...)
+	}
+	return h
+}
+
+// replayStoredHeaders writes all headers from cached metadata onto the response.
+// Headers like Content-Type, Docker-Content-Digest, and Content-Length are
+// included in the stored set, so no special-casing is needed.
+func replayStoredHeaders(w http.ResponseWriter, meta cache.ObjectMeta) {
+	for key, values := range meta.Header {
+		for _, v := range values {
+			w.Header().Add(key, v)
+		}
+	}
+	// Fallback: if Header map is nil (legacy cache entries without stored
+	// headers), set the critical headers from the explicit fields.
+	if meta.Header == nil {
+		if meta.ContentType != "" {
+			w.Header().Set("Content-Type", meta.ContentType)
+		}
+		if meta.DockerContentDigest != "" {
+			w.Header().Set("Docker-Content-Digest", meta.DockerContentDigest)
+		}
+		if meta.ContentLength > 0 {
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", meta.ContentLength))
 		}
 	}
 }

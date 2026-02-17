@@ -4,7 +4,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /oci-pull-through .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /oci-pull-through ./cmd/oci-pull-through
 
 FROM scratch
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/

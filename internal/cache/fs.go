@@ -2,7 +2,6 @@ package cache
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -22,13 +21,6 @@ func NewFSStore(root string) *FSStore {
 // Init ensures the root directory exists.
 func (f *FSStore) Init(_ context.Context) error {
 	return os.MkdirAll(f.root, 0o755)
-}
-
-// fsMeta is the JSON structure stored in sidecar .meta.json files.
-type fsMeta struct {
-	ContentType         string `json:"content_type"`
-	DockerContentDigest string `json:"docker_content_digest"`
-	ContentLength       int64  `json:"content_length"`
 }
 
 func (f *FSStore) dataPath(key string) string {
@@ -77,12 +69,7 @@ func (f *FSStore) Put(_ context.Context, key string, body io.Reader, meta Object
 	}
 
 	// Write metadata sidecar atomically
-	fm := fsMeta{
-		ContentType:         meta.ContentType,
-		DockerContentDigest: meta.DockerContentDigest,
-		ContentLength:       meta.ContentLength,
-	}
-	metaJSON, err := json.Marshal(fm)
+	metaJSON, err := MarshalMeta(meta)
 	if err != nil {
 		return fmt.Errorf("marshalling metadata: %w", err)
 	}
@@ -100,16 +87,11 @@ func (f *FSStore) readMeta(key string) (ObjectMeta, error) {
 		return ObjectMeta{}, err
 	}
 
-	var fm fsMeta
-	if err := json.Unmarshal(data, &fm); err != nil {
+	meta, err := UnmarshalMeta(data)
+	if err != nil {
 		return ObjectMeta{}, fmt.Errorf("parsing metadata: %w", err)
 	}
-
-	return ObjectMeta{
-		ContentType:         fm.ContentType,
-		DockerContentDigest: fm.DockerContentDigest,
-		ContentLength:       fm.ContentLength,
-	}, nil
+	return meta, nil
 }
 
 // atomicWrite writes data from a reader to dst via a temp file + rename.

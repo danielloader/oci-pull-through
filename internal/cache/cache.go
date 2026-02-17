@@ -2,7 +2,10 @@ package cache
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -19,6 +22,31 @@ type ObjectMeta struct {
 	ContentType         string
 	DockerContentDigest string
 	ContentLength       int64
+	Header              http.Header
+}
+
+// MarshalMeta serializes an ObjectMeta to JSON for sidecar storage.
+// Only the Header map is persisted; the explicit struct fields are derived
+// from it on read.
+func MarshalMeta(m ObjectMeta) ([]byte, error) {
+	return json.Marshal(m.Header)
+}
+
+// UnmarshalMeta deserializes JSON from a sidecar file into an ObjectMeta.
+// The explicit struct fields (ContentType, DockerContentDigest, ContentLength)
+// are extracted from the header map.
+func UnmarshalMeta(data []byte) (ObjectMeta, error) {
+	var h http.Header
+	if err := json.Unmarshal(data, &h); err != nil {
+		return ObjectMeta{}, err
+	}
+	cl, _ := strconv.ParseInt(h.Get("Content-Length"), 10, 64)
+	return ObjectMeta{
+		ContentType:         h.Get("Content-Type"),
+		DockerContentDigest: h.Get("Docker-Content-Digest"),
+		ContentLength:       cl,
+		Header:              h,
+	}, nil
 }
 
 // GetResult holds the body and metadata from a single get call.

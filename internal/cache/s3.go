@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -62,32 +63,59 @@ func (s *S3Store) Init(ctx context.Context) error {
 	return nil
 }
 
-// Head checks if an object exists and returns its metadata.
+// metaKey returns the S3 key for the metadata sidecar object.
+func metaKey(key string) string {
+	return key + ".meta.json"
+}
+
+// Head checks if an object exists and returns its metadata from the sidecar.
 func (s *S3Store) Head(ctx context.Context, key string) (ObjectMeta, error) {
-	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(metaKey(key)),
 	})
 	if err != nil {
 		return ObjectMeta{}, err
 	}
+	defer out.Body.Close()
 
-	meta := ObjectMeta{
-		ContentLength: aws.ToInt64(out.ContentLength),
+	data, err := io.ReadAll(out.Body)
+	if err != nil {
+		return ObjectMeta{}, fmt.Errorf("reading meta sidecar: %w", err)
 	}
-	if out.ContentType != nil {
-		meta.ContentType = *out.ContentType
-	}
-	if v, ok := out.Metadata["docker-content-digest"]; ok {
-		meta.DockerContentDigest = NormalizeDigest(v)
+
+	meta, err := UnmarshalMeta(data)
+	if err != nil {
+		return ObjectMeta{}, fmt.Errorf("parsing meta sidecar: %w", err)
 	}
 	return meta, nil
 }
 
-// GetWithMeta retrieves an object's body and metadata in a single GetObject call,
-// eliminating the HEAD+GET race window.
+// GetWithMeta retrieves an object's body and metadata.
+// It reads the sidecar .meta.json first, then opens the data object.
 func (s *S3Store) GetWithMeta(ctx context.Context, key string) (*GetResult, error) {
-	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+	// Read metadata sidecar
+	metaOut, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(metaKey(key)),
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer metaOut.Body.Close()
+
+	data, err := io.ReadAll(metaOut.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading meta sidecar: %w", err)
+	}
+
+	meta, err := UnmarshalMeta(data)
+	if err != nil {
+		return nil, fmt.Errorf("parsing meta sidecar: %w", err)
+	}
+
+	// Read data object
+	dataOut, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	})
@@ -95,29 +123,19 @@ func (s *S3Store) GetWithMeta(ctx context.Context, key string) (*GetResult, erro
 		return nil, err
 	}
 
-	meta := ObjectMeta{
-		ContentLength: aws.ToInt64(out.ContentLength),
-	}
-	if out.ContentType != nil {
-		meta.ContentType = *out.ContentType
-	}
-	if v, ok := out.Metadata["docker-content-digest"]; ok {
-		meta.DockerContentDigest = NormalizeDigest(v)
-	}
-
-	return &GetResult{Body: out.Body, Meta: meta}, nil
+	return &GetResult{Body: dataOut.Body, Meta: meta}, nil
 }
 
-// Put writes an object to S3 using a single PutObject call.
+// Put writes an object and its metadata sidecar to S3.
 // Race conditions are benign: blobs are content-addressed (identical content)
 // and manifest overwrites are harmless. The proxy handler already does a HEAD
 // check before fetching from upstream, so duplicate writes are unlikely.
 func (s *S3Store) Put(ctx context.Context, key string, body io.Reader, meta ObjectMeta) error {
+	// Write data object
 	input := &s3.PutObjectInput{
-		Bucket:   aws.String(s.bucket),
-		Key:      aws.String(key),
-		Body:     body,
-		Metadata: map[string]string{},
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+		Body:   body,
 	}
 
 	if meta.ContentLength > 0 {
@@ -125,9 +143,6 @@ func (s *S3Store) Put(ctx context.Context, key string, body io.Reader, meta Obje
 	}
 	if meta.ContentType != "" {
 		input.ContentType = aws.String(meta.ContentType)
-	}
-	if meta.DockerContentDigest != "" {
-		input.Metadata["docker-content-digest"] = meta.DockerContentDigest
 	}
 
 	_, err := s.client.PutObject(ctx, input,
@@ -139,8 +154,25 @@ func (s *S3Store) Put(ctx context.Context, key string, body io.Reader, meta Obje
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("putting to S3: %w", err)
+		return fmt.Errorf("putting data to S3: %w", err)
 	}
+
+	// Write metadata sidecar
+	metaJSON, err := MarshalMeta(meta)
+	if err != nil {
+		return fmt.Errorf("marshalling metadata: %w", err)
+	}
+
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(metaKey(key)),
+		Body:        bytes.NewReader(metaJSON),
+		ContentType: aws.String("application/json"),
+	})
+	if err != nil {
+		return fmt.Errorf("putting meta sidecar to S3: %w", err)
+	}
+
 	return nil
 }
 
