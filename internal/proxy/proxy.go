@@ -294,6 +294,10 @@ func setCacheControl(w http.ResponseWriter, info requestInfo) {
 
 // parsePath parses a /v2/ sub-path into its components.
 // Input path should already have "/v2/" prefix stripped.
+//
+// If the path has no registry hostname (no segment containing a dot or colon
+// before the kind keyword), the image is assumed to be a Docker Hub official
+// image and "docker.io" / "library" are prepended automatically.
 func parsePath(path string) (requestInfo, error) {
 	path = strings.TrimPrefix(path, "/")
 	path = strings.TrimSuffix(path, "/")
@@ -311,11 +315,17 @@ func parsePath(path string) (requestInfo, error) {
 	if kindIdx < 0 {
 		return requestInfo{}, fmt.Errorf("path must contain 'manifests' or 'blobs'")
 	}
-	if kindIdx < 2 {
-		return requestInfo{}, fmt.Errorf("path must include registry and image name before %s", segments[kindIdx])
-	}
 	if kindIdx+1 >= len(segments) {
 		return requestInfo{}, fmt.Errorf("missing reference after %s", segments[kindIdx])
+	}
+
+	// If the first segment doesn't look like a registry hostname (contains a
+	// dot or colon), assume Docker Hub official image: prepend docker.io/library.
+	if !looksLikeRegistry(segments[0]) {
+		segments = append([]string{"docker.io", "library"}, segments...)
+		kindIdx += 2
+	} else if kindIdx < 2 {
+		return requestInfo{}, fmt.Errorf("path must include registry and image name before %s", segments[kindIdx])
 	}
 
 	// Normalize the reference so that mangled digests (sha256-hex from
@@ -333,6 +343,12 @@ func parsePath(path string) (requestInfo, error) {
 		Kind:      segments[kindIdx],
 		Reference: ref,
 	}, nil
+}
+
+// looksLikeRegistry returns true if segment looks like a registry hostname
+// (contains a dot like "ghcr.io" or a port like "localhost:5000").
+func looksLikeRegistry(segment string) bool {
+	return strings.ContainsAny(segment, ".:")
 }
 
 // storageKey computes the storage key for a request.
