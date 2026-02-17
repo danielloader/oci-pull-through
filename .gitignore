@@ -1,4 +1,4 @@
-oci-pull-through
+/oci-pull-through
 *.exe
 *.dll
 *.so
