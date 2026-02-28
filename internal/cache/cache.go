@@ -49,6 +49,14 @@ func UnmarshalMeta(data []byte) (ObjectMeta, error) {
 	}, nil
 }
 
+// Redirector is an optional interface that cache stores can implement to
+// support HTTP redirects for cached objects. When implemented, the proxy
+// can redirect clients directly to the storage backend (e.g. via S3
+// presigned URLs) instead of streaming the data through the proxy.
+type Redirector interface {
+	RedirectURL(ctx context.Context, key string) (url string, meta ObjectMeta, err error)
+}
+
 // GetResult holds the body and metadata from a single get call.
 type GetResult struct {
 	Body io.ReadCloser

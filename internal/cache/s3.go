@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -22,6 +23,7 @@ import (
 // S3Store provides S3-backed caching for OCI objects.
 type S3Store struct {
 	client        *s3.Client
+	presignClient *s3.PresignClient
 	bucket        string
 	lifecycleDays int
 }
@@ -44,6 +46,7 @@ func NewS3Store(ctx context.Context, bucket string, forcePathStyle bool, lifecyc
 
 	return &S3Store{
 		client:        client,
+		presignClient: s3.NewPresignClient(client),
 		bucket:        bucket,
 		lifecycleDays: lifecycleDays,
 	}, nil
@@ -119,6 +122,26 @@ func (s *S3Store) Head(ctx context.Context, key string) (ObjectMeta, error) {
 		return ObjectMeta{}, fmt.Errorf("parsing meta sidecar: %w", err)
 	}
 	return meta, nil
+}
+
+// RedirectURL returns a presigned S3 URL for the data object along with its
+// metadata. The proxy uses this to redirect clients directly to S3, avoiding
+// streaming the blob through the proxy.
+func (s *S3Store) RedirectURL(ctx context.Context, key string) (string, ObjectMeta, error) {
+	meta, err := s.Head(ctx, key)
+	if err != nil {
+		return "", ObjectMeta{}, err
+	}
+
+	presigned, err := s.presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	}, s3.WithPresignExpires(15*time.Minute))
+	if err != nil {
+		return "", ObjectMeta{}, fmt.Errorf("presigning GetObject: %w", err)
+	}
+
+	return presigned.URL, meta, nil
 }
 
 // GetWithMeta retrieves an object's body and metadata.

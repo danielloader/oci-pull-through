@@ -1,19 +1,18 @@
 package proxy
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/danielloader/oci-pull-through/internal/cache"
 	"github.com/danielloader/oci-pull-through/internal/stream"
 )
-
-var validRegistry = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?(:[0-9]{1,5})?$`)
 
 // requestInfo holds the parsed components of an OCI registry request.
 type requestInfo struct {
@@ -61,6 +60,7 @@ func (r requestInfo) shortRef() string {
 
 // Handler is the main HTTP handler for the OCI proxy.
 type Handler struct {
+	Registry          string
 	Cache             cache.Store
 	Upstream          *UpstreamClient
 	CacheTagManifests bool
@@ -77,15 +77,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/v2")
 	path = strings.TrimPrefix(path, "/")
 
-	// GET /v2/ — version check
+	// GET /v2/ — proxy to upstream so auth challenges (401 + Www-Authenticate) flow through
 	if path == "" || path == "/" {
-		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
-		w.WriteHeader(http.StatusOK)
+		h.handleV2Check(w, r)
 		return
 	}
 
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOCIError(w, http.StatusMethodNotAllowed, "UNSUPPORTED", "read-only proxy: method not allowed")
 		return
 	}
 
@@ -94,8 +93,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	info.Registry = h.Registry
 
 	slog.Debug("request", "method", r.Method, "image", info.image(), "kind", info.Kind, "ref", info.shortRef())
+
+	// Referrers — pass through to upstream, no caching
+	if info.Kind == "referrers" {
+		h.handlePassthrough(w, r, info)
+		return
+	}
 
 	storageKey := storageKey(info)
 
@@ -107,6 +113,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// GET request — cache-first, then upstream with tee-stream
 	h.handleGet(w, r, info, storageKey)
+}
+
+func (h *Handler) handleV2Check(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.Upstream.DoV2Check(r, h.Registry)
+	if err != nil {
+		slog.Debug("upstream /v2/ check failed", "error", err)
+		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	defer resp.Body.Close()
+
+	copyResponseHeaders(w, resp)
+	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+	w.WriteHeader(resp.StatusCode)
+	if _, err := copyToClient(w, resp.Body); err != nil {
+		slog.Debug("error forwarding /v2/ response", "error", err)
+	}
 }
 
 func (h *Handler) handleHead(w http.ResponseWriter, r *http.Request, info requestInfo, key string) {
@@ -135,8 +159,42 @@ func (h *Handler) handleHead(w http.ResponseWriter, r *http.Request, info reques
 	w.WriteHeader(resp.StatusCode)
 }
 
+func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, info requestInfo) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	resp, err := h.Upstream.Do(r.WithContext(ctx), info)
+	if err != nil {
+		slog.Debug("upstream passthrough failed", "kind", info.Kind, "error", err)
+		writeError(w, "upstream unavailable", http.StatusGatewayTimeout)
+		return
+	}
+	defer resp.Body.Close()
+
+	copyResponseHeaders(w, resp)
+	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+	w.WriteHeader(resp.StatusCode)
+	if _, err := copyToClient(w, resp.Body); err != nil {
+		slog.Debug("error forwarding passthrough response", "error", err)
+	}
+}
+
 func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, info requestInfo, key string) {
-	// 1. Check cache (uncacheable requests skip straight to upstream)
+	// 1. Try redirect for backends that support presigned URLs (e.g. S3)
+	if redirector, ok := h.Cache.(cache.Redirector); ok && h.shouldCache(info) {
+		url, meta, err := redirector.RedirectURL(r.Context(), key)
+		if err == nil {
+			slog.Info("cache hit (redirect)", "image", info.image(), "kind", info.Kind, "ref", info.shortRef())
+			replayStoredHeaders(w, meta)
+			w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+			setCacheControl(w, info)
+			http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+			return
+		}
+		// Fall through to upstream on error (cache miss or presign failure)
+	}
+
+	// 2. Check cache with streaming (FS backend with seekable files)
 	if h.shouldCache(info) {
 		result, err := h.Cache.GetWithMeta(r.Context(), key)
 		if err == nil {
@@ -150,7 +208,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, info request
 				// handle Range negotiation, 206 responses, and Content-Range.
 				http.ServeContent(w, r, "", time.Time{}, seeker)
 			} else {
-				// S3 backend returns a non-seekable stream — serve full body.
+				// Non-seekable stream — serve full body.
 				w.WriteHeader(http.StatusOK)
 				if _, err := copyToClient(w, result.Body); err != nil {
 					slog.Debug("error streaming cached response", "error", err)
@@ -270,10 +328,22 @@ func replayStoredHeaders(w http.ResponseWriter, meta cache.ObjectMeta) {
 	}
 }
 
-// writeError sends an error response with the OCI version header.
+// writeError sends a plain-text error response with the OCI version header.
 func writeError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 	http.Error(w, msg, code)
+}
+
+// writeOCIError sends an OCI-compliant JSON error response.
+func writeOCIError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{
+		"errors": []map[string]string{
+			{"code": code, "message": message},
+		},
+	})
 }
 
 // setCacheControl sets Cache-Control headers based on content type.
@@ -295,9 +365,8 @@ func setCacheControl(w http.ResponseWriter, info requestInfo) {
 // parsePath parses a /v2/ sub-path into its components.
 // Input path should already have "/v2/" prefix stripped.
 //
-// If the path has no registry hostname (no segment containing a dot or colon
-// before the kind keyword), the image is assumed to be a Docker Hub official
-// image and "docker.io" / "library" are prepended automatically.
+// All segments before the "manifests" or "blobs" keyword form the image name.
+// The Registry field is left empty — the caller sets it from config.
 func parsePath(path string) (requestInfo, error) {
 	path = strings.TrimPrefix(path, "/")
 	path = strings.TrimSuffix(path, "/")
@@ -306,7 +375,7 @@ func parsePath(path string) (requestInfo, error) {
 	// Find "manifests" or "blobs" from the end
 	kindIdx := -1
 	for i := len(segments) - 1; i >= 0; i-- {
-		if segments[i] == "manifests" || segments[i] == "blobs" {
+		if segments[i] == "manifests" || segments[i] == "blobs" || segments[i] == "referrers" {
 			kindIdx = i
 			break
 		}
@@ -315,40 +384,22 @@ func parsePath(path string) (requestInfo, error) {
 	if kindIdx < 0 {
 		return requestInfo{}, fmt.Errorf("path must contain 'manifests' or 'blobs'")
 	}
+	if kindIdx < 1 {
+		return requestInfo{}, fmt.Errorf("path must include image name before %s", segments[kindIdx])
+	}
 	if kindIdx+1 >= len(segments) {
 		return requestInfo{}, fmt.Errorf("missing reference after %s", segments[kindIdx])
-	}
-
-	// If the first segment doesn't look like a registry hostname (contains a
-	// dot or colon), assume Docker Hub official image: prepend docker.io/library.
-	if !looksLikeRegistry(segments[0]) {
-		segments = append([]string{"docker.io", "library"}, segments...)
-		kindIdx += 2
-	} else if kindIdx < 2 {
-		return requestInfo{}, fmt.Errorf("path must include registry and image name before %s", segments[kindIdx])
 	}
 
 	// Normalize the reference so that mangled digests (sha256-hex from
 	// SeaweedFS metadata round-trip) are restored to sha256:hex.
 	ref := cache.NormalizeDigest(strings.Join(segments[kindIdx+1:], "/"))
 
-	registry := segments[0]
-	if !validRegistry.MatchString(registry) {
-		return requestInfo{}, fmt.Errorf("invalid registry name: %s", registry)
-	}
-
 	return requestInfo{
-		Registry:  registry,
-		Name:      strings.Join(segments[1:kindIdx], "/"),
+		Name:      strings.Join(segments[:kindIdx], "/"),
 		Kind:      segments[kindIdx],
 		Reference: ref,
 	}, nil
-}
-
-// looksLikeRegistry returns true if segment looks like a registry hostname
-// (contains a dot like "ghcr.io" or a port like "localhost:5000").
-func looksLikeRegistry(segment string) bool {
-	return strings.ContainsAny(segment, ".:")
 }
 
 // storageKey computes the storage key for a request.

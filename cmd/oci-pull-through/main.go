@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -34,6 +35,20 @@ func main() {
 
 	cfg := config.Load()
 
+	if cfg.UpstreamRegistry == "" {
+		fmt.Fprintln(os.Stderr, "UPSTREAM_REGISTRY is required (e.g. https://ghcr.io, https://registry-1.docker.io)")
+		os.Exit(1)
+	}
+	upstreamURL, err := url.Parse(cfg.UpstreamRegistry)
+	if err != nil || upstreamURL.Host == "" {
+		fmt.Fprintf(os.Stderr, "UPSTREAM_REGISTRY %q is not a valid URL (expected https://host or http://host)\n", cfg.UpstreamRegistry)
+		os.Exit(1)
+	}
+	if upstreamURL.Scheme != "https" && upstreamURL.Scheme != "http" {
+		fmt.Fprintf(os.Stderr, "UPSTREAM_REGISTRY scheme must be http or https, got %q\n", upstreamURL.Scheme)
+		os.Exit(1)
+	}
+
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -50,12 +65,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	upstreamClient := proxy.NewUpstreamClient()
+	upstreamClient.Scheme = upstreamURL.Scheme
+
 	handler := &proxy.Handler{
+		Registry:          upstreamURL.Host,
 		Cache:             store,
-		Upstream:          proxy.NewUpstreamClient(),
+		Upstream:          upstreamClient,
 		CacheTagManifests: cfg.CacheTagManifests,
 		CacheLatestTag:    cfg.CacheLatestTag,
 	}
+
+	logged := proxy.LoggingMiddleware(handler)
 
 	var server *http.Server
 
@@ -69,7 +90,7 @@ func main() {
 
 		server = &http.Server{
 			Addr:    cfg.ListenAddr,
-			Handler: handler,
+			Handler: logged,
 			TLSConfig: &tls.Config{
 				Certificates: []tls.Certificate{cert},
 			},
@@ -80,12 +101,12 @@ func main() {
 		h2s := &http2.Server{}
 		server = &http.Server{
 			Addr:    cfg.ListenAddr,
-			Handler: h2c.NewHandler(handler, h2s),
+			Handler: h2c.NewHandler(logged, h2s),
 		}
 	}
 
 	go func() {
-		slog.Info("starting server", "addr", cfg.ListenAddr, "tls", cfg.GenerateSelfSignedTLS, "backend", cfg.StorageBackend)
+		slog.Info("starting server", "addr", cfg.ListenAddr, "upstream", cfg.UpstreamRegistry, "tls", cfg.GenerateSelfSignedTLS, "backend", cfg.StorageBackend)
 		var err error
 		if cfg.GenerateSelfSignedTLS {
 			err = server.ListenAndServeTLS("", "")

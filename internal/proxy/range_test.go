@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -66,8 +67,8 @@ func blobMeta() cache.ObjectMeta {
 	}
 }
 
-func blobPath(registry string) string {
-	return "/v2/" + registry + "/test/image/blobs/sha256:abcdef1234567890"
+func blobPath() string {
+	return "/v2/test/image/blobs/sha256:abcdef1234567890"
 }
 
 // --- tests ---
@@ -80,11 +81,12 @@ func TestRangeCacheHitSeekable(t *testing.T) {
 		},
 	}
 	h := &Handler{
+		Registry: "example.com",
 		Cache:    store,
 		Upstream: &UpstreamClient{Client: http.DefaultClient},
 	}
 
-	req := httptest.NewRequest("GET", blobPath("example.com"), nil)
+	req := httptest.NewRequest("GET", blobPath(), nil)
 	req.Header.Set("Range", "bytes=5-9")
 	rec := httptest.NewRecorder()
 
@@ -109,11 +111,12 @@ func TestRangeCacheHitNonSeekable(t *testing.T) {
 		},
 	}
 	h := &Handler{
+		Registry: "example.com",
 		Cache:    store,
 		Upstream: &UpstreamClient{Client: http.DefaultClient},
 	}
 
-	req := httptest.NewRequest("GET", blobPath("example.com"), nil)
+	req := httptest.NewRequest("GET", blobPath(), nil)
 	req.Header.Set("Range", "bytes=5-9")
 	rec := httptest.NewRecorder()
 
@@ -143,11 +146,12 @@ func TestRangeCacheMissForwardsHeaders(t *testing.T) {
 	registry := strings.TrimPrefix(upstream.URL, "https://")
 
 	h := &Handler{
+		Registry: registry,
 		Cache:    &mockStore{err: fmt.Errorf("not found")},
-		Upstream: &UpstreamClient{Client: upstream.Client()},
+		Upstream: &UpstreamClient{Client: upstream.Client(), Scheme: "https"},
 	}
 
-	req := httptest.NewRequest("GET", blobPath(registry), nil)
+	req := httptest.NewRequest("GET", blobPath(), nil)
 	req.Header.Set("Range", "bytes=5-9")
 	req.Header.Set("If-Range", `"some-etag"`)
 	rec := httptest.NewRecorder()
@@ -176,11 +180,12 @@ func TestNoRangeCacheHitSeekable(t *testing.T) {
 		},
 	}
 	h := &Handler{
+		Registry: "example.com",
 		Cache:    store,
 		Upstream: &UpstreamClient{Client: http.DefaultClient},
 	}
 
-	req := httptest.NewRequest("GET", blobPath("example.com"), nil)
+	req := httptest.NewRequest("GET", blobPath(), nil)
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, req)
@@ -190,5 +195,73 @@ func TestNoRangeCacheHitSeekable(t *testing.T) {
 	}
 	if body := rec.Body.String(); body != testBlob {
 		t.Fatalf("expected full blob %q, got %q", testBlob, body)
+	}
+}
+
+func TestParsePath(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		want    requestInfo
+		wantErr bool
+	}{
+		{
+			name: "manifest by tag",
+			path: "org/image/manifests/v1.2.3",
+			want: requestInfo{Name: "org/image", Kind: "manifests", Reference: "v1.2.3"},
+		},
+		{
+			name: "manifest by digest",
+			path: "org/image/manifests/sha256:abc123",
+			want: requestInfo{Name: "org/image", Kind: "manifests", Reference: "sha256:abc123"},
+		},
+		{
+			name: "blob by digest",
+			path: "org/image/blobs/sha256:abc123",
+			want: requestInfo{Name: "org/image", Kind: "blobs", Reference: "sha256:abc123"},
+		},
+		{
+			name: "deeply nested image name",
+			path: "org/sub/repo/manifests/latest",
+			want: requestInfo{Name: "org/sub/repo", Kind: "manifests", Reference: "latest"},
+		},
+		{
+			name: "single-segment image name",
+			path: "library/manifests/latest",
+			want: requestInfo{Name: "library", Kind: "manifests", Reference: "latest"},
+		},
+		{
+			name:    "no kind keyword",
+			path:    "org/image/v1.0",
+			wantErr: true,
+		},
+		{
+			name:    "no image name before kind",
+			path:    "manifests/latest",
+			wantErr: true,
+		},
+		{
+			name:    "missing reference",
+			path:    "org/image/manifests",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parsePath(tt.path)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("got %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }

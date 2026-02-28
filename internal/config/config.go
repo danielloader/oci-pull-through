@@ -12,16 +12,17 @@ import (
 // credential chain and do not appear in this struct.
 
 type Config struct {
-	StorageBackend       string
-	FSRoot               string
-	ListenAddr           string
-	S3Bucket             string
-	S3ForcePathStyle     bool
-	CacheTagManifests    bool
-	CacheLatestTag       bool
+	UpstreamRegistry      string
+	StorageBackend        string
+	FSRoot                string
+	ListenAddr            string
+	S3Bucket              string
+	S3ForcePathStyle      bool
+	CacheTagManifests     bool
+	CacheLatestTag        bool
 	S3LifecycleDays       int
 	GenerateSelfSignedTLS bool
-	LogLevel             slog.Level
+	LogLevel              slog.Level
 }
 
 func Load() Config {
@@ -34,6 +35,7 @@ func Load() Config {
 	lifecycleDays, _ := strconv.Atoi(envOr("S3_LIFECYCLE_DAYS", "28"))
 
 	return Config{
+		UpstreamRegistry:      os.Getenv("UPSTREAM_REGISTRY"),
 		StorageBackend:        envOr("STORAGE_BACKEND", "s3"),
 		FSRoot:                envOr("FS_ROOT", "/data/oci-cache"),
 		ListenAddr:            envOr("LISTEN_ADDR", defaultAddr),
