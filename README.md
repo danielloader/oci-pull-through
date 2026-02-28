@@ -36,11 +36,20 @@ simultaneously streams the response to the client and the cache
 store. The client is never blocked by cache writes -- if the cache
 store is slow or fails, the client stream continues uninterrupted.
 
-On a cache hit, the response is served directly from the cache
-store. No upstream request is made. All upstream response headers
-(excluding hop-by-hop headers) are stored alongside the cached
-object and replayed on cache hits, making the proxy transparent to
-clients that depend on headers like `ETag` or `Accept-Ranges`.
+On a cache hit with the S3 backend, the proxy returns an HTTP 307
+redirect to a presigned S3 URL. The client fetches the blob directly
+from S3, removing the proxy from the data path entirely. This avoids
+the double-bandwidth penalty (S3→proxy→client) that streaming would
+incur. The OCI distribution spec explicitly allows 307 redirects for
+blob GETs, and Docker/containerd clients handle them correctly.
+
+The filesystem backend continues to stream directly from disk (with
+full Range/206 support via `http.ServeContent`).
+
+All upstream response headers (excluding hop-by-hop headers) are
+stored alongside the cached object and replayed on cache hits,
+making the proxy transparent to clients that depend on headers like
+`ETag` or `Accept-Ranges`.
 
 ## Caching behaviour
 
@@ -85,6 +94,7 @@ All configuration is via environment variables.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `S3_BUCKET` | `oci-cache` | Bucket name. Auto-created. |
+| `S3_PREFIX` | -- | Key prefix for all objects. Allows multiple proxy instances to share a bucket. |
 | `S3_FORCE_PATH_STYLE` | `true` | Path-style S3 URLs. |
 | `S3_LIFECYCLE_DAYS` | `28` | Expire cached objects after this many days. `0` disables. |
 | `AWS_ACCESS_KEY_ID` | -- | Standard SDK credential chain. |
@@ -95,6 +105,23 @@ All configuration is via environment variables.
 Credentials, region, and endpoint are resolved through the standard
 AWS SDK default credential chain. IAM instance profiles, ECS task
 roles, and `~/.aws/credentials` all work as expected.
+
+#### Shared buckets
+
+Multiple proxy instances (each fronting a different upstream
+registry) can share a single S3 bucket by setting `S3_PREFIX`:
+
+```shell
+# Instance 1: ghcr.io proxy
+S3_BUCKET=oci-cache S3_PREFIX=ghcr UPSTREAM_REGISTRY=https://ghcr.io ...
+
+# Instance 2: Docker Hub proxy
+S3_BUCKET=oci-cache S3_PREFIX=dockerhub UPSTREAM_REGISTRY=https://registry-1.docker.io ...
+```
+
+Objects are stored under `{prefix}/blobs/...` and
+`{prefix}/manifests/...`. The lifecycle policy is scoped to the
+prefix, so each instance manages its own expiry independently.
 
 ### Filesystem backend
 
@@ -178,6 +205,7 @@ success, 1 on failure.
 | `GET` | `/v2/` | OCI version check. |
 | `GET`, `HEAD` | `/v2/{reg}/{name}/manifests/{ref}` | Manifest. |
 | `GET`, `HEAD` | `/v2/{reg}/{name}/blobs/{digest}` | Blob. |
+| `GET` | `/v2/{reg}/{name}/referrers/{digest}` | Referrers (proxied to upstream). |
 
 The proxy supports multi-segment image names
 (e.g., `/v2/ghcr.io/org/sub/image/manifests/latest`).

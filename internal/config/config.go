@@ -17,6 +17,7 @@ type Config struct {
 	FSRoot                string
 	ListenAddr            string
 	S3Bucket              string
+	S3Prefix              string
 	S3ForcePathStyle      bool
 	CacheTagManifests     bool
 	CacheLatestTag        bool
@@ -40,6 +41,7 @@ func Load() Config {
 		FSRoot:                envOr("FS_ROOT", "/data/oci-cache"),
 		ListenAddr:            envOr("LISTEN_ADDR", defaultAddr),
 		S3Bucket:              envOr("S3_BUCKET", "oci-cache"),
+		S3Prefix:              os.Getenv("S3_PREFIX"),
 		S3ForcePathStyle:      envOr("S3_FORCE_PATH_STYLE", "true") == "true",
 		S3LifecycleDays:       lifecycleDays,
 		CacheTagManifests:     envOr("CACHE_TAG_MANIFESTS", "true") == "true",

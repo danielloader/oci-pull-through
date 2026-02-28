@@ -25,6 +25,7 @@ type S3Store struct {
 	client        *s3.Client
 	presignClient *s3.PresignClient
 	bucket        string
+	prefix        string
 	lifecycleDays int
 }
 
@@ -32,7 +33,7 @@ type S3Store struct {
 // Credentials, region, and endpoint are resolved via the standard AWS SDK
 // default credential chain (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
 // AWS_REGION, AWS_ENDPOINT_URL, instance profiles, etc.).
-func NewS3Store(ctx context.Context, bucket string, forcePathStyle bool, lifecycleDays int) (*S3Store, error) {
+func NewS3Store(ctx context.Context, bucket, prefix string, forcePathStyle bool, lifecycleDays int) (*S3Store, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("loading AWS config: %w", err)
@@ -44,10 +45,17 @@ func NewS3Store(ctx context.Context, bucket string, forcePathStyle bool, lifecyc
 		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 	})
 
+	// Normalize prefix: ensure it ends with "/" if non-empty, so keys
+	// become "prefix/blobs/..." rather than "prefixblobs/...".
+	if prefix != "" {
+		prefix = strings.TrimSuffix(prefix, "/") + "/"
+	}
+
 	return &S3Store{
 		client:        client,
 		presignClient: s3.NewPresignClient(client),
 		bucket:        bucket,
+		prefix:        prefix,
 		lifecycleDays: lifecycleDays,
 	}, nil
 }
@@ -79,7 +87,7 @@ func (s *S3Store) Init(ctx context.Context) error {
 					{
 						ID:     aws.String("oci-cache-expiry"),
 						Status: types.ExpirationStatusEnabled,
-						Filter: &types.LifecycleRuleFilter{Prefix: aws.String("")},
+						Filter: &types.LifecycleRuleFilter{Prefix: aws.String(s.prefix)},
 						Expiration: &types.LifecycleExpiration{
 							Days: aws.Int32(int32(s.lifecycleDays)),
 						},
@@ -96,16 +104,21 @@ func (s *S3Store) Init(ctx context.Context) error {
 	return nil
 }
 
+// fullKey prepends the configured prefix to a storage key.
+func (s *S3Store) fullKey(key string) string {
+	return s.prefix + key
+}
+
 // metaKey returns the S3 key for the metadata sidecar object.
-func metaKey(key string) string {
-	return key + ".meta.json"
+func (s *S3Store) metaKey(key string) string {
+	return s.fullKey(key) + ".meta.json"
 }
 
 // Head checks if an object exists and returns its metadata from the sidecar.
 func (s *S3Store) Head(ctx context.Context, key string) (ObjectMeta, error) {
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(metaKey(key)),
+		Key:    aws.String(s.metaKey(key)),
 	})
 	if err != nil {
 		return ObjectMeta{}, err
@@ -135,7 +148,7 @@ func (s *S3Store) RedirectURL(ctx context.Context, key string) (string, ObjectMe
 
 	presigned, err := s.presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(s.fullKey(key)),
 	}, s3.WithPresignExpires(15*time.Minute))
 	if err != nil {
 		return "", ObjectMeta{}, fmt.Errorf("presigning GetObject: %w", err)
@@ -150,7 +163,7 @@ func (s *S3Store) GetWithMeta(ctx context.Context, key string) (*GetResult, erro
 	// Read metadata sidecar
 	metaOut, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(metaKey(key)),
+		Key:    aws.String(s.metaKey(key)),
 	})
 	if err != nil {
 		return nil, err
@@ -170,7 +183,7 @@ func (s *S3Store) GetWithMeta(ctx context.Context, key string) (*GetResult, erro
 	// Read data object
 	dataOut, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(s.fullKey(key)),
 	})
 	if err != nil {
 		return nil, err
@@ -189,7 +202,7 @@ func (s *S3Store) Put(ctx context.Context, key string, body io.Reader, meta Obje
 	// existing object is identical, so we treat the conflict as success.
 	input := &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
-		Key:         aws.String(key),
+		Key:         aws.String(s.fullKey(key)),
 		Body:        body,
 		IfNoneMatch: aws.String("*"),
 	}
@@ -225,7 +238,7 @@ func (s *S3Store) Put(ctx context.Context, key string, body io.Reader, meta Obje
 
 	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
-		Key:         aws.String(metaKey(key)),
+		Key:         aws.String(s.metaKey(key)),
 		Body:        bytes.NewReader(metaJSON),
 		ContentType: aws.String("application/json"),
 	})
