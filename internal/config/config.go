@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -24,9 +25,10 @@ type Config struct {
 	S3LifecycleDays       int
 	GenerateSelfSignedTLS bool
 	LogLevel              slog.Level
+	ProxyMode             string // "transparent" or "authenticated"
 }
 
-func Load() Config {
+func Load() (Config, error) {
 	selfSigned := envOr("GENERATE_SELF_SIGNED_TLS", "false") == "true"
 	defaultAddr := ":8080"
 	if selfSigned {
@@ -34,6 +36,11 @@ func Load() Config {
 	}
 
 	lifecycleDays, _ := strconv.Atoi(envOr("S3_LIFECYCLE_DAYS", "28"))
+
+	proxyMode := os.Getenv("PROXY_MODE")
+	if proxyMode != "transparent" && proxyMode != "authenticated" {
+		return Config{}, fmt.Errorf("PROXY_MODE is required and must be \"transparent\" or \"authenticated\" (got %q)", proxyMode)
+	}
 
 	return Config{
 		UpstreamRegistry:      os.Getenv("UPSTREAM_REGISTRY"),
@@ -48,7 +55,8 @@ func Load() Config {
 		CacheLatestTag:        envOr("CACHE_LATEST_TAG", "false") == "true",
 		GenerateSelfSignedTLS: selfSigned,
 		LogLevel:              parseLogLevel(envOr("LOG_LEVEL", "info")),
-	}
+		ProxyMode:             proxyMode,
+	}, nil
 }
 
 func envOr(key, fallback string) string {

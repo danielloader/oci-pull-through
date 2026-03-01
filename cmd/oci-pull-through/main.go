@@ -33,7 +33,11 @@ func main() {
 		os.Exit(0)
 	}
 
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	if cfg.UpstreamRegistry == "" {
 		fmt.Fprintln(os.Stderr, "UPSTREAM_REGISTRY is required (e.g. https://ghcr.io, https://registry-1.docker.io)")
@@ -74,6 +78,7 @@ func main() {
 		Upstream:          upstreamClient,
 		CacheTagManifests: cfg.CacheTagManifests,
 		CacheLatestTag:    cfg.CacheLatestTag,
+		ProxyMode:         cfg.ProxyMode,
 	}
 
 	logged := proxy.LoggingMiddleware(handler)
@@ -106,7 +111,7 @@ func main() {
 	}
 
 	go func() {
-		slog.Info("starting server", "addr", cfg.ListenAddr, "upstream", cfg.UpstreamRegistry, "tls", cfg.GenerateSelfSignedTLS, "backend", cfg.StorageBackend)
+		slog.Info("starting server", "addr", cfg.ListenAddr, "upstream", cfg.UpstreamRegistry, "mode", cfg.ProxyMode, "tls", cfg.GenerateSelfSignedTLS, "backend", cfg.StorageBackend)
 		var err error
 		if cfg.GenerateSelfSignedTLS {
 			err = server.ListenAndServeTLS("", "")

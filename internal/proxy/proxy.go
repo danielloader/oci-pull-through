@@ -65,6 +65,7 @@ type Handler struct {
 	Upstream          *UpstreamClient
 	CacheTagManifests bool
 	CacheLatestTag    bool
+	ProxyMode         string // "transparent" or "authenticated"
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -119,6 +120,12 @@ func (h *Handler) handleV2Check(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.Upstream.DoV2Check(r, h.Registry)
 	if err != nil {
 		slog.Debug("upstream /v2/ check failed", "error", err)
+		if h.ProxyMode == "authenticated" {
+			writeError(w, "upstream unavailable", http.StatusBadGateway)
+			return
+		}
+		// transparent: serve static 200 so clients can proceed with cached content
+		slog.Warn("upstream unreachable, serving cached content without auth validation")
 		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 		w.WriteHeader(http.StatusOK)
 		return
@@ -134,6 +141,23 @@ func (h *Handler) handleV2Check(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleHead(w http.ResponseWriter, r *http.Request, info requestInfo, key string) {
+	// authenticated: always forward HEAD to upstream for fresh auth + headers
+	if h.ProxyMode == "authenticated" {
+		resp, err := h.Upstream.Do(r, info)
+		if err != nil {
+			slog.Debug("upstream HEAD failed", "error", err)
+			writeError(w, "upstream unavailable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		copyResponseHeaders(w, resp)
+		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+		w.WriteHeader(resp.StatusCode)
+		return
+	}
+
+	// transparent: serve from cache if available
 	if h.shouldCache(info) {
 		meta, err := h.Cache.Head(r.Context(), key)
 		if err == nil {
@@ -145,7 +169,7 @@ func (h *Handler) handleHead(w http.ResponseWriter, r *http.Request, info reques
 		}
 	}
 
-	// Cache miss or tag manifest — forward HEAD to upstream
+	// Cache miss — forward HEAD to upstream
 	resp, err := h.Upstream.Do(r, info)
 	if err != nil {
 		slog.Debug("upstream HEAD failed", "error", err)
@@ -184,6 +208,11 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, info request
 	if redirector, ok := h.Cache.(cache.Redirector); ok && h.shouldCache(info) {
 		url, meta, err := redirector.RedirectURL(r.Context(), key)
 		if err == nil {
+			if h.ProxyMode == "authenticated" {
+				if !h.validateUpstreamAuth(w, r, info) {
+					return
+				}
+			}
 			slog.Info("cache hit (redirect)", "image", info.image(), "kind", info.Kind, "ref", info.shortRef())
 			replayStoredHeaders(w, meta)
 			w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
@@ -198,6 +227,12 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, info request
 	if h.shouldCache(info) {
 		result, err := h.Cache.GetWithMeta(r.Context(), key)
 		if err == nil {
+			if h.ProxyMode == "authenticated" {
+				if !h.validateUpstreamAuth(w, r, info) {
+					result.Body.Close()
+					return
+				}
+			}
 			slog.Info("cache hit", "image", info.image(), "kind", info.Kind, "ref", info.shortRef())
 			defer result.Body.Close()
 			replayStoredHeaders(w, result.Meta)
@@ -218,7 +253,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, info request
 		}
 	}
 
-	// 2. Cache miss or tag manifest — fetch from upstream
+	// 3. Cache miss — fetch from upstream
 	slog.Info("upstream fetch", "image", info.image(), "kind", info.Kind, "ref", info.shortRef())
 	resp, err := h.Upstream.Do(r, info)
 	if err != nil {
@@ -240,7 +275,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, info request
 		return
 	}
 
-	// 3. 200 OK — tag manifests forward directly, everything else tee-streams to S3
+	// 4. 200 OK — tag manifests forward directly, everything else tee-streams to cache
 	copyResponseHeaders(w, resp)
 	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 	if !h.shouldCache(info) {
@@ -265,6 +300,52 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, info request
 	if err != nil {
 		slog.Debug("tee stream error", "key", key, "error", err)
 	}
+}
+
+// validateUpstreamAuth sends a HEAD request to upstream to validate the client's
+// auth credentials before serving from cache. Used in authenticated mode only.
+// Returns true if the caller should proceed to serve from cache, false if the
+// response has already been written (auth failure or upstream error).
+func (h *Handler) validateUpstreamAuth(w http.ResponseWriter, r *http.Request, info requestInfo) bool {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	upstreamURL := h.Upstream.upstreamURL(info)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, upstreamURL, nil)
+	if err != nil {
+		slog.Error("failed to create upstream validation request", "error", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return false
+	}
+
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	if accept := r.Header.Get("Accept"); accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+
+	resp, err := h.Upstream.Client.Do(req)
+	if err != nil {
+		slog.Debug("upstream auth validation failed", "error", err)
+		writeError(w, "upstream unavailable", http.StatusBadGateway)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Debug("upstream auth validation rejected", "status", resp.StatusCode, "image", info.image(), "ref", info.shortRef())
+		copyResponseHeaders(w, resp)
+		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+		w.WriteHeader(resp.StatusCode)
+		if _, err := copyToClient(w, resp.Body); err != nil {
+			slog.Debug("error forwarding upstream validation response", "error", err)
+		}
+		return false
+	}
+
+	slog.Debug("upstream auth validated", "image", info.image(), "ref", info.shortRef())
+	return true
 }
 
 // hopByHopHeaders are headers that should not be forwarded by a proxy.

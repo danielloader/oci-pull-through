@@ -19,6 +19,7 @@ tasks:
       - go build ./cmd/oci-pull-through && ./oci-pull-through
     env:
       UPSTREAM_REGISTRY: https://registry-1.docker.io
+      PROXY_MODE: transparent
       STORAGE_BACKEND: s3
       AWS_ENDPOINT_URL: http://localhost:8333
       AWS_ACCESS_KEY_ID: admin

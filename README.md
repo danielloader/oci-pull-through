@@ -76,12 +76,75 @@ to balance freshness with upstream rate limits.
 Non-2xx upstream responses are forwarded to the client as-is and
 are never cached.
 
+## Proxy modes
+
+The proxy operates in one of two mutually exclusive modes, controlled
+by the required `PROXY_MODE` environment variable. Setting both or
+neither is a startup error.
+
+### Proxy Mode: `transparent`
+
+Maximum availability, no auth enforcement. The proxy is an
+unauthenticated cache that serves whatever it has. Ideal for private
+Kubernetes clusters where the network is the security boundary.
+
+- `/v2/` check: tries upstream; if unreachable, returns a static
+  `200 OK` so clients can proceed with cached content.
+- **HEAD** (cache hit): served immediately from cache. Auth header
+  ignored.
+- **GET** (cache hit): served from cache (S3 redirect or FS stream)
+  immediately. Auth header ignored.
+- **Cache miss with upstream down**: `502 Bad Gateway` — can't serve
+  what we don't have.
+- **Cache miss with upstream up**: forwarded to upstream with the
+  client's auth header. Response is tee-streamed to cache.
+
+**Security implications:**
+
+- Any client that can reach the proxy can pull any cached content.
+- No token validation occurs on cache hits.
+- The `/v2/` auth challenge is forwarded when upstream is up (clients
+  still authenticate with upstream on cache misses), but when upstream
+  is down auth is skipped entirely.
+- Secure this mode with network policy, private subnets, or an
+  authenticating reverse proxy in front.
+
+### Proxy Mode: `authenticated`
+
+Auth is always validated against upstream. The cache accelerates
+delivery of large layers but never bypasses access control. Upstream
+must be reachable for all requests.
+
+- `/v2/` check: always forwarded to upstream. If unreachable →
+  `502 Bad Gateway`.
+- **HEAD**: always forwarded to upstream with the client's auth.
+  Cache is not consulted — upstream HEAD is lightweight and gives
+  the freshest headers.
+- **GET** (cache hit): before serving from cache, a HEAD request is
+  sent to upstream for the same resource with the client's auth:
+  - Upstream `200` → auth valid, serve body from cache.
+  - Upstream `401`/`403` → forwarded to client (auth rejected).
+  - Upstream `404` → forwarded to client (resource removed upstream).
+  - Upstream unreachable → `502` (no degraded fallback).
+- **GET** (cache miss): forwarded to upstream with auth. Response is
+  tee-streamed to cache.
+
+**Performance characteristics:**
+
+- Every cache-hit GET adds one upstream HEAD round-trip (~100-200ms).
+- But the blob body comes from local S3/FS instead of the internet.
+- For large images (1GB+ layers), the HEAD overhead is negligible
+  compared to bandwidth savings.
+- HEAD requests from clients are always forwarded to upstream (no
+  cache benefit for HEAD).
+
 ## Configuration
 
 All configuration is via environment variables.
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `PROXY_MODE` | *(required)* | `transparent` or `authenticated`. See [Proxy modes](#proxy-modes). |
 | `STORAGE_BACKEND` | `s3` | Storage backend. `s3` or `fs`. |
 | `LISTEN_ADDR` | `:8080` (`:8443` with TLS) | Listen address. |
 | `GENERATE_SELF_SIGNED_TLS` | `false` | Generate a self-signed TLS certificate on startup. |
